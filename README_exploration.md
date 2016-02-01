@@ -21,9 +21,11 @@ Note: The code won't work without this file.
 
 Outcome:
 A file named 'DataAnalysis.xlsx' in the current working directory. This file will have 3 sheets:
+
 1. Overall Summary:
   - Gives basic information like number of categorical and continuous features
   - Also gives number of unique values
+
 2. Categorical Summary:
   - Gives summary of categorical features
   - The summary statistics for each feature include:
@@ -35,6 +37,7 @@ A file named 'DataAnalysis.xlsx' in the current working directory. This file wil
     - 60% concentration: #labels comprising top 60% data
     - 80% concentration: #labels comprising top 80% data
     - Top 5 Categories: names along with #data points in each
+
 3. Continuous Summary:
   - Gives summary of continuous features
   - The summary statistics for each feature include:
@@ -48,6 +51,7 @@ A file named 'DataAnalysis.xlsx' in the current working directory. This file wil
     - 75th Percentile
     - Max
     - #Values beyond 1.5 IQR
+
 4. Relational Summary:
   - A matrix with p-values for each combination of variables.
   - The statistical test performed are:
