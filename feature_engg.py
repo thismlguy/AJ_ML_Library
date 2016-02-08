@@ -3,7 +3,7 @@
 ###############################################################################
 
 """
-Function1: bivariate(col1, col2)
+Function1: bivariate(col1, col2, col1Type='infer', col2Type='infer')
     used to generate plots corresponding to a pair of columns
     Arguments: 
         a. col1: Series object - the first column to be analyzed 
@@ -12,8 +12,8 @@ Function1: bivariate(col1, col2)
     Output: 
         a. Chart corresponding to the data
 
-Function2: univariate(col, colType, transformation=None, param=None, return_mod=False)
-    used to analuze 1 variable at a time
+Function2: univariate(col, colType='infer', transformation=None, param={},check_duplicate_categories=False,return_mod=False)
+    used to analuze 1 variable at a time. Note: This doesn't change the original variable 
     Arguments: 
         a. col: Series object - the column to be analyzed 
         b. colType: string constant - 2 options: 'categorical' or 'continuous' 
@@ -23,10 +23,12 @@ Function2: univariate(col, colType, transformation=None, param=None, return_mod=
         d. param: the parameters required for the transformation type selected
             i. if 'continuous' & 'combine': Pass a list of intermediate cut-points. Min and Max will automatically added
             ii. if 'categorical' & 'combine' : Pass a dictionary in format - {'new_category':[list of categories to combines]}
-        e. return_mod: if True returns the modified variable e. parameters: to be added
+        e. check_duplicate_categories: Applicable only for categorical varaible. Checks if the categories are different only by upper or lower case and resolves the same. Eg - 'High' and 'high' will be resolved to 'high'
+        f. return_mod: if True returns the modified variable which can be used to create a new variable or replace the old one
     
     Output: 
         a. Chart corresponding to the data
+        b. The modified variable if return_mod is True
 
 Funtion3: def imputation(data, col, method, param={}, colType='infer')
     Function to perform imputation. 
@@ -95,7 +97,7 @@ def bar_chart(plt, data, Xlabel=None, Ylabel=None, Title=None, Legend=True, Widt
     plt.xticks(ind , (data.columns), rotation=30, ha="center")
 
     if Legend:
-        plt.legend(p, data.index, loc="best")
+        plt.legend(p, data.index, loc="best", bbox_to_anchor=(1.7,-0.3))
 
 #Function to plot a scatter chart
 def scatter_chart(plt, col1, col2, Title="Scatter Plot"):
@@ -167,6 +169,7 @@ def chart_both_categorical(col1, col2):
     plt.subplot(122)
     bar_chart(plt,contingencyTable, Xlabel=col1.name, Ylabel=col2.name, Title="Bar Chart (Percentage)", Legend=False)
 
+    plt.tight_layout()
     plt.show(block=False)
 
 #Plot for case of both continuous variables.
@@ -220,7 +223,11 @@ def bivariate(col1, col2, col1Type='infer', col2Type='infer'):
             chart_combo(col2, col1)
 
 #Univariate analysis:
-def univariate(col, colType, transformation=None, param={},check_duplicate_categories=False,return_mod=False):
+def univariate(col, colType='infer', transformation=None, param={},check_duplicate_categories=False,return_mod=False):
+
+    #Get the column type if it is infer
+    if colType=='infer':
+        colType = check_datatype(col)
 
     #Case of contiuous variable:
     if colType == "continuous":
@@ -339,7 +346,7 @@ def univariate(col, colType, transformation=None, param={},check_duplicate_categ
 def imputation(data, col, method, param={}, colType='infer'):
     
     #Set the type of column:
-    if colType='infer':
+    if colType=='infer':
         colType = check_datatype(data[col])
 
     #Initialize imputed column as the original column
