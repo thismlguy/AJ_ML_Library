@@ -11,12 +11,14 @@ from scipy.stats.mstats import chisquare, mode
         
 from sklearn.linear_model import LogisticRegression
 from sklearn.cross_validation import KFold
-from sklearn.ensemble import RandomForestClassifier, AdaBoostClassifier, GradientBoostingClassifier
+from sklearn.ensemble import RandomForestClassifier, ExtraTreesClassifier,AdaBoostClassifier, GradientBoostingClassifier
 from sklearn.tree import DecisionTreeClassifier, export_graphviz
-from sklearn import metrics
+from sklearn.grid_search import GridSearchCV
+from sklearn import metrics, cross_validation
 from sklearn.feature_selection import RFE, RFECV
-from sklearn.externals.six import StringIO
-import xgboost  
+from StringIO import StringIO
+import xgboost as xgb
+from xgboost.sklearn import XGBClassifier
 
 #######################################################################################################################
 ##### GENERIC MODEL CLASS
@@ -24,7 +26,7 @@ import xgboost
 
 #This class contains the generic classification functions and variable definitions applicable across all models 
 class GenericModelClass(object):
-    def __init__(self, alg, data_train, data_test, target, predictors=[],cv_folds=10):
+    def __init__(self, alg, data_train, data_test, target, predictors=[],cv_folds=5,scoring_metric='accuracy'):
         self.alg = alg                  #an instance of particular model class
         self.data_train = data_train    #training data
         self.data_test = data_test      #testing data
@@ -32,9 +34,17 @@ class GenericModelClass(object):
         self.cv_folds = cv_folds
         self.predictors = predictors
         self.train_predictions = []
+        self.train_pred_prob = []
         self.test_predictions = []
         self.test_pred_prob = []
         self.num_target_class = len(data_train[target].unique())
+
+        #define scoring metric:
+        self.scoring_metric = scoring_metric
+
+        #grid-search objects:
+        self.gridsearch_class = None
+        self.gridsearch_result = None
 
         #Define a Series object to store generic classification model outcomes; 
         self.classification_output=pd.Series(index=['ModelID','Accuracy','CVScore_mean','CVScore_std','AUC',
@@ -59,22 +69,30 @@ class GenericModelClass(object):
     def get_feature_importance(self):
         return self.feature_imp
 
+    def set_scoring_metric(scoring_metric):
+        self.scoring_metric = scoring_metric
+
     #Implement K-Fold cross-validation 
-    def KFold_CrossValidation(self):
-        # Generate cross validation folds for the training dataset.  
-        kf = KFold(self.data_train.shape[0], n_folds=self.cv_folds)
+    def KFold_CrossValidation(self, scoring_metric):
+        # Generate cross validation folds for the training dataset. 
+
+        error = cross_validation.cross_val_score(self.alg, self.data_train[self.predictors], self.data_train[self.target], 
+            cv=self.cv_folds, scoring=scoring_metric, n_jobs=4)
+
+        #Old Method: 
+        # kf = KFold(self.data_train.shape[0], n_folds=self.cv_folds)
         
-        error = []
-        for train, test in kf:
-            # Filter training data
-            train_predictors = (self.data_train[self.predictors].iloc[train,:])
-            # The target we're using to train the algorithm.
-            train_target = self.data_train[self.target].iloc[train]
-            # Training the algorithm using the predictors and target.
-            self.alg.fit(train_predictors, train_target)
+        # error = []
+        # for train, test in kf:
+        #     # Filter training data
+        #     train_predictors = (self.data_train[self.predictors].iloc[train,:])
+        #     # The target we're using to train the algorithm.
+        #     train_target = self.data_train[self.target].iloc[train]
+        #     # Training the algorithm using the predictors and target.
+        #     self.alg.fit(train_predictors, train_target)
             
-            #Record error from each cross-validation run
-            error.append(self.alg.score(self.data_train[self.predictors].iloc[test,:], self.data_train[self.target].iloc[test]))
+        #     #Record error from each cross-validation run
+        #     error.append(self.alg.score(self.data_train[self.predictors].iloc[test,:], self.data_train[self.target].iloc[test]))
             
         return {'mean_error': np.mean(error),
                 'std_error': np.std(error),
@@ -103,8 +121,8 @@ class GenericModelClass(object):
         return selected
 
     #Performs similar function as RFE but with CV. It removed features similar to RFE but the importance of the group of features is based on the cross-validation score. The set of features with highest cross validation scores is then chosen. The difference from RFE is that the #features is not an input but selected by algo
-    def RecursiveFeatureEliminationCV(self, step=1, inplace=False, scoring='accuracy'):
-        rfecv = RFECV(self.alg, step=step,cv=self.cv_folds,scoring=scoring)
+    def RecursiveFeatureEliminationCV(self, step=1, inplace=False):
+        rfecv = RFECV(self.alg, step=step,cv=self.cv_folds,scoring=self.scoring_metric)
         
         rfecv.fit(self.data_train[self.predictors], self.data_train[self.target])
 
@@ -121,12 +139,33 @@ class GenericModelClass(object):
             self.set_predictors(selected.index.tolist())
         return ranks
 
+    #Perform Grid-Search with CV:
+    def GridSearch(self, param_grid, n_jobs=1,iid=True, cv=None):
+        self.gridsearch_class = GridSearchCV(self.alg, param_grid=param_grid, scoring=self.scoring_metric, n_jobs=n_jobs, iid=iid, cv=cv)
+        self.gridsearch_class.fit(self.data_train[self.predictors], self.data_train[self.target])
+        print 'Grid Search Results:'
+        self.gridsearch_result = pd.DataFrame()
+        for key in param_grid.keys():
+            self.gridsearch_result[key] = [ x[0][key] for x in self.gridsearch_class.grid_scores_]
+        self.gridsearch_result['meanCV'] = [x[1] for x in self.gridsearch_class.grid_scores_]
+        self.gridsearch_result['stdCV'] = [np.std(x[2]) for x in self.gridsearch_class.grid_scores_]
+        print self.gridsearch_result
+        print '\nBest Parameters: ', self.gridsearch_class.best_params_
+        print '\nBest Score: ', self.gridsearch_class.best_score_
+        # return self.gridsearch_class
+
     # Determine key metrics to analyze the classification model. These are stored in the classification_output series object belonginf to this class.
     def calc_model_characteristics(self, performCV=True):
         self.classification_output['Accuracy'] = metrics.accuracy_score(self.data_train[self.target],self.train_predictions)
 
+        #define scoring metric:
+        if self.scoring_metric == 'roc_auc':
+            self.classification_output['ScoringMetric'] = metrics.roc_auc_score(self.data_train[self.target],self.train_pred_prob[:,1])        
+        elif self.scoring_metric == 'log_loss':
+            self.classification_output['ScoringMetric'] = metrics.log_loss(self.data_train[self.target],self.train_pred_prob) 
+
         if performCV:
-            cv_score= self.KFold_CrossValidation()
+            cv_score= self.KFold_CrossValidation(scoring_metric=self.scoring_metric)
         else:
             cv_score={'mean_error': 0.0, 'std_error': 0.0}
 
@@ -134,33 +173,43 @@ class GenericModelClass(object):
         self.classification_output['CVScore_mean'] = cv_score['mean_error']
         self.classification_output['CVScore_std'] = cv_score['std_error']
         if self.num_target_class < 3:
-            self.classification_output['AUC'] = metrics.roc_auc_score(self.data_train[self.target],self.test_pred_prob)
+            # print self.data_train[self.target].shape
+            # print self.train_pred_prob.shape
+            self.classification_output['AUC'] = metrics.roc_auc_score(self.data_train[self.target],self.train_pred_prob[:,1])
         else:
             self.classification_output['AUC'] = np.nan
         self.classification_output['ConfusionMatrix'] = pd.crosstab(self.data_train[self.target], self.train_predictions).to_string()
         self.classification_output['Predictors'] = str(self.predictors)
 
     # Print the metric determined in the previous function.
-    def printReport(self, ROCcurve=False):
+    def printReport(self):
         print "\nModel Report"
         print "Confusion Matrix:"
         print pd.crosstab(self.data_train[self.target], self.train_predictions)
         print 'Note: rows - actual; col - predicted'
         # print "\nClassification Report:"
         # print metrics.classification_report(y_true=self.data_train[self.target], y_pred=self.train_predictions)
-        print "Accuracy : %s" % "{0:.3%}".format(self.classification_output['Accuracy'])
+        print "Train (Accuracy) : %s" % "{0:.3%}".format(self.classification_output['Accuracy'])
+        if self.scoring_metric!='accuracy':
+            print "Train (%s) : %f" % (self.scoring_metric,self.classification_output['ScoringMetric'])
         print "AUC : %s" % "{0:.3%}".format(self.classification_output['AUC'])
-        print "CV Score : Mean - %s | Std - %s" % ("{0:.3%}".format(self.classification_output['CVScore_mean']),"{0:.3%}".format(self.classification_output['CVScore_std']))
+        print "CV Score (Specified Metric) : Mean - %f | Std - %f" % (self.classification_output['CVScore_mean'],self.classification_output['CVScore_std'])
         
-        if ROCcurve:
-            fpr, tpr, thresholds = metrics.roc_curve(self.data_train[self.target],self.test_pred_prob)
-
-    # create submission file
+    # create submission file with the absolute prediction
     def submission(self, IDcol, filename="Submission.csv"):
-        submission = pd.DataFrame({
-                IDcol: self.data_test[IDcol],
-                self.target: self.test_predictions.astype(int)
-            })
+        submission = pd.DataFrame({ x: self.data_test[x] for x in list(IDcol)})
+        submission[self.target] = self.test_predictions.astype(int)
+        submission.to_csv(filename, index=False)
+
+    # create submission file with the predicted probabilities
+    def submission_proba(self, IDcol, proba_colnames,filename="Submission.csv"):
+        submission = pd.DataFrame({ x: self.data_test[x] for x in list(IDcol)})
+        
+        if len(list(proba_colnames))>1:
+            for i in range(len(proba_colnames)):
+                submission[proba_colnames[i]] = self.test_pred_prob[:,i]
+        else: 
+            submission[list(proba_colnames)[0]] = self.test_pred_prob[:,1]
         submission.to_csv(filename, index=False)
 
     #checks whether the ensemble directory exists and creates one if it doesn't
@@ -175,8 +224,8 @@ class GenericModelClass(object):
 
 class Logistic_Regression(GenericModelClass):
 
-    def __init__(self,data_train, data_test, target, predictors=[],cv_folds=10):
-        GenericModelClass.__init__(self, alg=LogisticRegression(), data_train=data_train, data_test=data_test, target=target, predictors=predictors,cv_folds=cv_folds)
+    def __init__(self,data_train, data_test, target, predictors=[],cv_folds=10,scoring_metric='accuracy'):
+        GenericModelClass.__init__(self, alg=LogisticRegression(), data_train=data_train, data_test=data_test, target=target, predictors=predictors,cv_folds=cv_folds,scoring_metric=scoring_metric)
         self.default_parameters = {'C':1.0, 'tol':0.0001, 'solver':'liblinear','multi_class':'ovr','class_weight':'balanced'}
         self.model_output=pd.Series(self.default_parameters)
         self.model_output['Coefficients'] = "-"
@@ -217,27 +266,35 @@ class Logistic_Regression(GenericModelClass):
     
     #Fit the model using predictors and parameters specified before.
     # Inputs:
-    #     printROC - if True, prints an ROC curve. This functionality is currently not implemented
-    def modelfit(self, printROC=False, performCV=True):
+    #     printCV - if True, CV is performed
+    def modelfit(self, performCV=True):
 
         #Outpute the parameters for the model for cross-checking:
         print 'Model being built with the following parameters:'
         print self.alg.get_params()
         
         self.alg.fit(self.data_train[self.predictors], self.data_train[self.target])
-        coeff = pd.Series(np.concatenate((self.alg.intercept_,self.alg.coef_[0,:])), index=["Intercept"]+self.predictors)
+
+        if self.num_target_class==2:
+            coeff = pd.Series(np.concatenate((self.alg.intercept_,self.alg.coef_)), index=["Intercept"]+self.predictors)
+        else:
+            cols = ['coef_class_%d'%i for i in range(0,self.num_target_class)]
+            coeff = pd.DataFrame(self.alg.coef_.T, columns=cols,index=self.predictors)
         print 'Coefficients: '
         print coeff
 
         self.model_output['Coefficients'] = coeff.to_string()
         
-        #Get predictions:
-        self.test_predictions = self.alg.predict(self.data_test[self.predictors])
+        #Get train predictions:
         self.train_predictions = self.alg.predict(self.data_train[self.predictors])
-        self.test_pred_prob = self.alg.predict_proba(self.data_train[self.predictors])[:,1]
+        self.train_pred_prob = self.alg.predict_proba(self.data_train[self.predictors])
+
+        #Get test predictions:
+        self.test_predictions = self.alg.predict(self.data_test[self.predictors])
+        self.test_pred_prob = self.alg.predict_proba(self.data_test[self.predictors])
 
         self.calc_model_characteristics(performCV)
-        self.printReport(ROCcurve=printROC)
+        self.printReport()
     
     #Export the model into the model file as well as create a submission with model index. This will be used for creating an ensemble.
     def export_model(self, IDcol):
@@ -265,9 +322,9 @@ class Logistic_Regression(GenericModelClass):
 #######################################################################################################################
 
 class Decision_Tree_Class(GenericModelClass):
-    def __init__(self,data_train, data_test, target, predictors=[],cv_folds=10):
+    def __init__(self,data_train, data_test, target, predictors=[],cv_folds=10,scoring_metric='accuracy'):
         GenericModelClass.__init__(self, alg=DecisionTreeClassifier(), data_train=data_train, 
-                                   data_test=data_test, target=target, predictors=predictors,cv_folds=cv_folds)
+                                   data_test=data_test, target=target, predictors=predictors,cv_folds=cv_folds,scoring_metric=scoring_metric)
         self.default_parameters = {'criterion':'gini', 'max_depth':None, 
                                    'min_samples_split':2, 'min_samples_leaf':1, 
                                    'max_features':None, 'random_state':None, 'max_leaf_nodes':None, 'class_weight':'balanced'}
@@ -324,8 +381,8 @@ class Decision_Tree_Class(GenericModelClass):
     
     #Fit the model using predictors and parameters specified before.
     # Inputs:
-    #     printROC - if True, prints an ROC curve. This functionality is currently not implemented
-    def modelfit(self, printROC=False, performCV=True):
+    #     printCV - if True, CV is performed
+    def modelfit(self,  performCV=True):
 
         #Outpute the parameters for the model for cross-checking:
         print 'Model being built with the following parameters:'
@@ -333,33 +390,39 @@ class Decision_Tree_Class(GenericModelClass):
         
         self.alg.fit(self.data_train[self.predictors], self.data_train[self.target])
         
-        print 'Feature Importance Scores: '
-        self.feature_imp = pd.Series(self.alg.feature_importances_, index=self.predictors).sort_values()
-        print self.feature_imp
+        # print Feature Importance Scores table
+        self.feature_imp = pd.Series(self.alg.feature_importances_, index=self.predictors).sort_values(ascending=False)
+        self.feature_imp.plot(kind='bar', title='Feature Importances')
+        plt.ylabel('Feature Importance Score')
+        plt.show(block=False)
+
         self.model_output['Feature_Importance'] = self.feature_imp.to_string()
 
-        #Get predictions:
-        self.test_predictions = self.alg.predict(self.data_test[self.predictors])
+        #Get train predictions:
         self.train_predictions = self.alg.predict(self.data_train[self.predictors])
+        self.train_pred_prob = self.alg.predict_proba(self.data_train[self.predictors])
+
+        #Get test predictions:
+        self.test_predictions = self.alg.predict(self.data_test[self.predictors])
         self.test_pred_prob = self.alg.predict_proba(self.data_test[self.predictors])
-        # print self.test_pred_prob
-        # print self.test_predictions
 
         self.calc_model_characteristics(performCV)
-        self.printReport(ROCcurve=printROC)
+        self.printReport()
 
     #Print the tree in visual format
     # Inputs:
     #     export_pdf - if True, a pdf will be exported with the filename as specified in pdf_name argument
     #     pdf_name - name of the pdf file if export_pdf is True
-    def printTree(self, export_pdf=True, pdf_name="Decision_Tree.pdf"):
+    def printTree(self, export_pdf=True, file_name="Decision_Tree.pdf"):
         dot_data = StringIO() 
         export_graphviz(self.alg, out_file=dot_data, feature_names=self.predictors,    
+                         filled=True, rounded=True, special_characters=True) 
+        export_graphviz(self.alg, out_file='data.dot', feature_names=self.predictors,    
                          filled=True, rounded=True, special_characters=True) 
         graph = pydot.graph_from_dot_data(dot_data.getvalue()) 
         
         if export_pdf:
-            graph.write_pdf(pdf_name)
+            graph.write_pdf(file_name)
 
         return graph
 
@@ -388,13 +451,13 @@ class Decision_Tree_Class(GenericModelClass):
 #######################################################################################################################
 
 class Random_Forest_Class(GenericModelClass):
-    def __init__(self,data_train, data_test, target, predictors=[],cv_folds=10):
+    def __init__(self,data_train, data_test, target, predictors=[],cv_folds=10,scoring_metric='accuracy'):
         GenericModelClass.__init__(self, alg=RandomForestClassifier(), data_train=data_train, 
-                                   data_test=data_test, target=target, predictors=predictors,cv_folds=cv_folds)
+                                   data_test=data_test, target=target, predictors=predictors,cv_folds=cv_folds,scoring_metric=scoring_metric)
         self.default_parameters = {
                                     'n_estimators':10, 'criterion':'gini', 'max_depth':None,' min_samples_split':2, 
                                     'min_samples_leaf':1, 'max_features':'auto', 'max_leaf_nodes':None,
-                                    'oob_score':False, 'random_state':None, 'class_weight':'balanced' 
+                                    'oob_score':False, 'random_state':None, 'class_weight':'balanced', 'n_jobs':1 
                                   }
         self.model_output = pd.Series(self.default_parameters)
         self.model_output['Feature_Importance'] = "-"
@@ -462,14 +525,18 @@ class Random_Forest_Class(GenericModelClass):
             self.alg.set_params(class_weight=param['class_weight'])
             self.model_output['class_weight'] = param['class_weight']
 
+        if 'n_jobs' in param:
+            self.alg.set_params(n_jobs=param['n_jobs'])
+            self.model_output['n_jobs'] = param['n_jobs']
+
         #cross validation folds
         if 'cv_folds' in param:
             self.cv_folds = param['cv_folds']
 
     #Fit the model using predictors and parameters specified before.
     # Inputs:
-    #     printROC - if True, prints an ROC curve. This functionality is currently not implemented
-    def modelfit(self, printROC=False, performCV=True):
+    #     printCV - if True, CV is performed
+    def modelfit(self,  performCV=True, printTopN='all'):
 
         #Outpute the parameters for the model for cross-checking:
         print 'Model being built with the following parameters:'
@@ -477,22 +544,32 @@ class Random_Forest_Class(GenericModelClass):
         
         self.alg.fit(self.data_train[self.predictors], self.data_train[self.target])
         
-        print 'Feature Importance Scores: '
-        self.feature_imp = pd.Series(self.alg.feature_importances_, index=self.predictors).sort_values()
-        print self.feature_imp
+        # print Feature Importance Scores table
+        self.feature_imp = pd.Series(self.alg.feature_importances_, index=self.predictors).sort_values(ascending=False)
+
+        num_print = len(self.feature_imp)
+        if printTopN != 'all':
+            num_print = min(printTopN,len(self.feature_imp))
+        self.feature_imp.iloc[:num_print-1].plot(kind='bar', title='Feature Importances')
+        plt.ylabel('Feature Importance Score')
+        plt.show(block=False)
+
         self.model_output['Feature_Importance'] = self.feature_imp.to_string()
 
         if self.model_output['oob_score']:
             print 'OOB Score : %f' % self.alg.oob_score_
             self.model_output['OOB_Score'] = self.alg.oob_score_
 
-        #Get predictions:
-        self.test_predictions = self.alg.predict(self.data_test[self.predictors])
+        #Get train predictions:
         self.train_predictions = self.alg.predict(self.data_train[self.predictors])
-        self.test_pred_prob = self.alg.predict_proba(self.data_train[self.predictors])[:,1]
+        self.train_pred_prob = self.alg.predict_proba(self.data_train[self.predictors])
+
+        #Get test predictions:
+        self.test_predictions = self.alg.predict(self.data_test[self.predictors])
+        self.test_pred_prob = self.alg.predict_proba(self.data_test[self.predictors])
 
         self.calc_model_characteristics(performCV)
-        self.printReport(ROCcurve=printROC)
+        self.printReport()
 
     #Export the model into the model file as well as create a submission with model index. This will be used for creating an ensemble.
     def export_model(self, IDcol):
@@ -515,13 +592,158 @@ class Random_Forest_Class(GenericModelClass):
         self.submission(IDcol, model_filename)
 
 #######################################################################################################################
+##### EXTRA TREES FOREST
+#######################################################################################################################
+
+class ExtraTrees_Class(GenericModelClass):
+    def __init__(self,data_train, data_test, target, predictors=[],cv_folds=10,scoring_metric='accuracy'):
+        GenericModelClass.__init__(self, alg=ExtraTreesClassifier(), data_train=data_train, 
+                                   data_test=data_test, target=target, predictors=predictors,cv_folds=cv_folds,scoring_metric=scoring_metric)
+        self.default_parameters = {
+                                    'n_estimators':10, 'criterion':'gini', 'max_depth':None,' min_samples_split':2, 
+                                    'min_samples_leaf':1, 'max_features':'auto', 'max_leaf_nodes':None,
+                                    'oob_score':False, 'random_state':None, 'class_weight':'balanced', 'n_jobs':1 
+                                  }
+        self.model_output = pd.Series(self.default_parameters)
+        self.model_output['Feature_Importance'] = "-"
+        self.model_output['OOB_Score'] = "-"
+
+        #Set parameters to default values:
+        self.set_parameters(set_default=True)
+
+    # Set the parameters of the model. 
+    # Note: 
+    #     > only the parameters to be updated are required to be passed
+    #     > if set_default is True, the passed parameters are ignored and default parameters are set which are defined in   scikit learn module
+    def set_parameters(self, param=None, set_default=False):
+        
+        #Set param to default values if default set
+        if set_default:
+            param = self.default_parameters
+
+        #trees in forest:
+        if 'n_estimators' in param:
+            self.alg.set_params(n_estimators=param['n_estimators'])
+            self.model_output['n_estimators'] = param['n_estimators']
+        
+        #decision tree split criteria
+        if 'criterion' in param:
+            self.alg.set_params(criterion=param['criterion'])
+            self.model_output['criterion'] = param['criterion']
+        
+        #maximum depth of each tree (ignored if max_leaf_nodes is not None)
+        if 'max_depth' in param:
+            self.alg.set_params(max_depth=param['max_depth'])
+            self.model_output['max_depth'] = param['max_depth']
+        
+        #min #samples required to split an internal node; typically around 20-50
+        if 'min_samples_split' in param:
+            self.alg.set_params(min_samples_split=param['min_samples_split'])
+            self.model_output['min_samples_split'] = param['min_samples_split']
+        
+        #The minimum number of samples in newly created leaves.
+        if 'min_samples_leaf' in param:
+            self.alg.set_params(min_samples_leaf=param['min_samples_leaf'])
+            self.model_output['min_samples_leaf'] = param['min_samples_leaf']
+
+        #max features to be considered for each split
+        if 'max_features' in param:
+            self.alg.set_params(max_features=param['max_features'])
+            self.model_output['max_features'] = param['max_features']
+
+        #for replication of results
+        if 'random_state' in param:
+            self.alg.set_params(random_state=param['random_state'])
+            self.model_output['random_state'] = param['random_state']
+
+        #to research
+        if 'max_leaf_nodes' in param:
+            self.alg.set_params(max_leaf_nodes=param['max_leaf_nodes'])
+            self.model_output['max_leaf_nodes'] = param['max_leaf_nodes']
+
+        #whether to use Out of Bag samples for calculate generalization error
+        if 'oob_score' in param:
+            self.alg.set_params(oob_score=param['oob_score'])
+            self.model_output['oob_score'] = param['oob_score']
+
+        if 'class_weight' in param:
+            self.alg.set_params(class_weight=param['class_weight'])
+            self.model_output['class_weight'] = param['class_weight']
+
+        if 'n_jobs' in param:
+            self.alg.set_params(n_jobs=param['n_jobs'])
+            self.model_output['n_jobs'] = param['n_jobs']
+
+        #cross validation folds
+        if 'cv_folds' in param:
+            self.cv_folds = param['cv_folds']
+
+    #Fit the model using predictors and parameters specified before.
+    # Inputs:
+    #     printCV - if True, CV is performed
+    def modelfit(self,  performCV=True, printTopN='all'):
+
+        #Outpute the parameters for the model for cross-checking:
+        print 'Model being built with the following parameters:'
+        print self.alg.get_params()
+        
+        self.alg.fit(self.data_train[self.predictors], self.data_train[self.target])
+        
+        # print Feature Importance Scores table
+        self.feature_imp = pd.Series(self.alg.feature_importances_, index=self.predictors).sort_values(ascending=False)
+
+        num_print = len(self.feature_imp)
+        if printTopN != 'all':
+            num_print = min(printTopN,len(self.feature_imp))
+        self.feature_imp.iloc[:num_print-1].plot(kind='bar', title='Feature Importances')
+        plt.ylabel('Feature Importance Score')
+        plt.show(block=False)
+
+        self.model_output['Feature_Importance'] = self.feature_imp.to_string()
+
+        if self.model_output['oob_score']:
+            print 'OOB Score : %f' % self.alg.oob_score_
+            self.model_output['OOB_Score'] = self.alg.oob_score_
+
+        #Get train predictions:
+        self.train_predictions = self.alg.predict(self.data_train[self.predictors])
+        self.train_pred_prob = self.alg.predict_proba(self.data_train[self.predictors])
+
+        #Get test predictions:
+        self.test_predictions = self.alg.predict(self.data_test[self.predictors])
+        self.test_pred_prob = self.alg.predict_proba(self.data_test[self.predictors])
+
+        self.calc_model_characteristics(performCV)
+        self.printReport()
+
+    #Export the model into the model file as well as create a submission with model index. This will be used for creating an ensemble.
+    def export_model(self, IDcol):
+        self.create_ensemble_dir()
+        filename = os.path.join(os.getcwd(),'ensemble/extree_models.csv')
+        comb_series = self.classification_output.append(self.model_output, verify_integrity=True)
+
+        if os.path.exists(filename):
+            models = pd.read_csv(filename)
+            mID = int(max(models['ModelID'])+1)
+        else:
+            mID = 1
+            models = pd.DataFrame(columns=comb_series.index)
+            
+        comb_series['ModelID'] = mID
+        models = models.append(comb_series, ignore_index=True)
+        
+        models.to_csv(filename, index=False, float_format="%.5f")
+        model_filename = os.path.join(os.getcwd(),'ensemble/extree_'+str(mID)+'.csv')
+        self.submission(IDcol, model_filename)
+
+#######################################################################################################################
 ##### ADABOOST CLASSIFICATION
 #######################################################################################################################
 
 class AdaBoost_Class(GenericModelClass):
-    def __init__(self,data_train, data_test, target, predictors=[],cv_folds=10):
+    def __init__(self,data_train, data_test, target, predictors=[],cv_folds=10,scoring_metric='accuracy'):
         GenericModelClass.__init__(self, alg=AdaBoostClassifier(), data_train=data_train, 
-                                   data_test=data_test, target=target, predictors=predictors,cv_folds=cv_folds)
+                                   data_test=data_test, target=target, predictors=predictors,cv_folds=cv_folds,scoring_metric=scoring_metric)
         self.default_parameters = { 'n_estimators':50, 'learning_rate':1.0 }
         self.model_output = pd.Series(self.default_parameters)
         self.model_output['Feature_Importance'] = "-"
@@ -554,8 +776,8 @@ class AdaBoost_Class(GenericModelClass):
 
     #Fit the model using predictors and parameters specified before.
     # Inputs:
-    #     printROC - if True, prints an ROC curve. This functionality is currently not implemented
-    def modelfit(self, printROC=False, performCV=True):
+    #     printCV - if True, CV is performed
+    def modelfit(self,  performCV=True):
 
         #Outpute the parameters for the model for cross-checking:
         print 'Model being built with the following parameters:'
@@ -563,9 +785,12 @@ class AdaBoost_Class(GenericModelClass):
         
         self.alg.fit(self.data_train[self.predictors], self.data_train[self.target])
         
-        print 'Feature Importance Scores: '
-        self.feature_imp = pd.Series(self.alg.feature_importances_, index=self.predictors).sort_values()
-        print self.feature_imp
+        # print Feature Importance Scores table
+        self.feature_imp = pd.Series(self.alg.feature_importances_, index=self.predictors).sort_values(ascending=False)
+        self.feature_imp.plot(kind='bar', title='Feature Importances')
+        plt.ylabel('Feature Importance Score')
+        plt.show(block=False)
+
         self.model_output['Feature_Importance'] = self.feature_imp.to_string()
 
         plt.xlabel("AdaBoost Estimator")
@@ -575,13 +800,16 @@ class AdaBoost_Class(GenericModelClass):
         plt.legend(['estimator_errors','estimator_weights'], loc='upper left')
         plt.show(block=False)
 
-        #Get predictions:
-        self.test_predictions = self.alg.predict(self.data_test[self.predictors])
+        #Get train predictions:
         self.train_predictions = self.alg.predict(self.data_train[self.predictors])
-        self.test_pred_prob = self.alg.predict_proba(self.data_train[self.predictors])[:,1]
+        self.train_pred_prob = self.alg.predict_proba(self.data_train[self.predictors])
 
-        self.calc_model_characteristics(performCV)
-        self.printReport(ROCcurve=printROC)
+        #Get test predictions:
+        self.test_predictions = self.alg.predict(self.data_test[self.predictors])
+        self.test_pred_prob = self.alg.predict_proba(self.data_test[self.predictors])
+
+        self.calc_model_characteristics(performCVl)
+        self.printReport()
 
     #Export the model into the model file as well as create a submission with model index. This will be used for creating an ensemble.
     def export_model(self, IDcol):
@@ -608,9 +836,9 @@ class AdaBoost_Class(GenericModelClass):
 #######################################################################################################################
 
 class GradientBoosting_Class(GenericModelClass):
-    def __init__(self,data_train, data_test, target, predictors=[],cv_folds=10):
+    def __init__(self,data_train, data_test, target, predictors=[],cv_folds=10,scoring_metric='accuracy'):
         GenericModelClass.__init__(self, alg=GradientBoostingClassifier(), data_train=data_train, 
-                                   data_test=data_test, target=target, predictors=predictors,cv_folds=cv_folds)
+                                   data_test=data_test, target=target, predictors=predictors,cv_folds=cv_folds,scoring_metric=scoring_metric)
         self.default_parameters = {
                                     'loss':'deviance', 'learning_rate':0.1, 'n_estimators':100, 'subsample':1.0, 'min_samples_split':2, 'min_samples_leaf':1,
                                     'max_depth':3, 'init':None, 'random_state':None, 'max_features':None, 'verbose':0, 
@@ -684,15 +912,23 @@ class GradientBoosting_Class(GenericModelClass):
         if 'presort' in param:
             self.alg.set_params(presort=param['presort'])
             self.model_output['presort'] = param['presort']
+
+        if 'verbost' in param:
+            self.alg.set_params(verbose=param['verbose'])
+            self.model_output['verbose'] = param['verbose']
         
+        if 'warm_start' in param:
+            self.alg.set_params(warm_start=param['warm_start'])
+            self.model_output['warm_start'] = param['warm_start']
+
         #cross validation folds
         if 'cv_folds' in param:
             self.cv_folds = param['cv_folds']
 
     #Fit the model using predictors and parameters specified before.
     # Inputs:
-    #     printROC - if True, prints an ROC curve. This functionality is currently not implemented
-    def modelfit(self, printROC=False, performCV=True):
+    #     printCV - if True, CV is performed
+    def modelfit(self,  performCV=True):
 
         #Outpute the parameters for the model for cross-checking:
         print 'Model being built with the following parameters:'
@@ -700,9 +936,12 @@ class GradientBoosting_Class(GenericModelClass):
 
         self.alg.fit(self.data_train[self.predictors], self.data_train[self.target])
         
-        print 'Feature Importance Scores: '
-        self.feature_imp = pd.Series(self.alg.feature_importances_, index=self.predictors).sort_values()
-        print self.feature_imp
+        # print Feature Importance Scores table
+        self.feature_imp = pd.Series(self.alg.feature_importances_, index=self.predictors).sort_values(ascending=False)
+        self.feature_imp.plot(kind='bar', title='Feature Importances')
+        plt.ylabel('Feature Importance Score')
+        plt.show(block=False)
+
         self.model_output['Feature_Importance'] = self.feature_imp.to_string()
 
         #Plot OOB estimates if subsample <1:
@@ -714,13 +953,16 @@ class GradientBoosting_Class(GenericModelClass):
             plt.legend(['oob_improvement_','train_score_'], loc='upper left')
             plt.show(block=False)
 
-        #Get predictions:
-        self.test_predictions = self.alg.predict(self.data_test[self.predictors])
+        #Get train predictions:
         self.train_predictions = self.alg.predict(self.data_train[self.predictors])
-        self.test_pred_prob = self.alg.predict_proba(self.data_train[self.predictors])[:,1]
+        self.train_pred_prob = self.alg.predict_proba(self.data_train[self.predictors])
+
+        #Get test predictions:
+        self.test_predictions = self.alg.predict(self.data_test[self.predictors])
+        self.test_pred_prob = self.alg.predict_proba(self.data_test[self.predictors])
 
         self.calc_model_characteristics(performCV)
-        self.printReport(ROCcurve=printROC)
+        self.printReport()
 
     #Export the model into the model file as well as create a submission with model index. This will be used for creating an ensemble.
     def export_model(self, IDcol):
@@ -746,33 +988,59 @@ class GradientBoosting_Class(GenericModelClass):
 ##### XGBOOST ALGORITHM
 #######################################################################################################################
 
+#Define the class similar to the overall classification class
 class XGBoost_Class(GenericModelClass):
-    def __init__(self,data_train, data_test, target, predictors=[],cv_folds=10):
-        GenericModelClass.__init__(self, alg=xgboost.XGBClassifier(), data_train=data_train, 
-                                   data_test=data_test, target=target, predictors=predictors,cv_folds=cv_folds)
+    def __init__(self,data_train, data_test, target, predictors, cv_folds=10,scoring_metric_skl='accuracy', scoring_metric_xgb='error'):
+        
+        GenericModelClass.__init__(self, alg=XGBClassifier(), data_train=data_train, 
+                                   data_test=data_test, target=target, predictors=predictors,cv_folds=cv_folds,scoring_metric=scoring_metric_skl)
+        
+        #Define default parameters on your own:
         self.default_parameters = { 
                                  'max_depth':3, 'learning_rate':0.1,
                                  'n_estimators':100, 'silent':True,
                                  'objective':"binary:logistic",
-                                 'nthread':-1, 'gamma':0, 'min_child_weight':1,
+                                 'nthread':1, 'gamma':0, 'min_child_weight':1,
                                  'max_delta_step':0, 'subsample':1, 'colsample_bytree':1, 'colsample_bylevel':1,
                                  'reg_alpha':0, 'reg_lambda':1, 'scale_pos_weight':1,
                                  'base_score':0.5, 'seed':0, 'missing':None
                             }
         self.model_output = pd.Series(self.default_parameters)
+
+        #create DMatrix with no missing:
+        self.xgtrain = xgb.DMatrix(self.data_train[self.predictors].values, label=self.data_train[self.target].values)
+        self.xgtest = xgb.DMatrix(self.data_test[self.predictors].values)
+        self.num_class = 2
+        self.n_estimators = 10
+        self.eval_metric = 'error'
+
+        self.train_predictions = []
+        self.train_pred_prob = []
+        self.test_predictions = []
+        self.test_pred_prob = []
+        self.num_target_class = len(data_train[target].unique())
+
+        #define scoring metric:
+        self.scoring_metric_skl = scoring_metric_skl
+        self.scoring_metric_xgb = scoring_metric_xgb
+
+        #Define a Series object to store generic classification model outcomes; 
+        self.classification_output=pd.Series(index=['ModelID','Accuracy','CVScore_mean','CVScore_std','SpecifiedMetric',
+                                             'ActualScore (manual entry)','CVMethod','ConfusionMatrix','Predictors'])
+
+        #feature importance (g_scores)
+        self.feature_imp = None
         self.model_output['Feature_Importance'] = "-"
 
-        self.eval_metric = None  #To update with set parameters
-
         #Set parameters to default values:
-        self.set_parameters(set_default=True)
+        # self.set_parameters(set_default=True)
+
 
     # Set the parameters of the model. 
     # Note: 
     #     > only the parameters to be updated are required to be passed
     #     > if set_default is True, the passed parameters are ignored and default parameters are set which are defined in   scikit learn module
     def set_parameters(self, param=None, set_default=False):
-        
         #Set param to default values if default set
         if set_default:
             param = self.default_parameters
@@ -789,6 +1057,7 @@ class XGBoost_Class(GenericModelClass):
         if 'n_estimators' in param:
             self.alg.set_params(n_estimators=param['n_estimators'])
             self.model_output['n_estimators'] = param['n_estimators']
+            self.n_estimators = param['n_estimators']
 
         if 'silent' in param:
             self.alg.set_params(silent=param['silent'])
@@ -820,60 +1089,95 @@ class XGBoost_Class(GenericModelClass):
 
         if 'eval_metric' in param:
             self.eval_metric = param['eval_metric']
-    
 
-        # if '' in param:
-        #     self.alg.set_params(=param[''])
-        #     self.model_output[''] = param['']
+        if 'nthread' in param:
+            self.alg.set_params(nthread=param['nthread'])
+            self.model_output['nthread'] = param['nthread']
 
-        # if '' in param:
-        #     self.alg.set_params(=param[''])
-        #     self.model_output[''] = param['']
-    
-    def KFold_CrossValidation(self):
-        # print 'xgboost override working'
-        # Generate cross validation folds for the training dataset.  
-        kf = KFold(self.data_train.shape[0], n_folds=self.cv_folds)
+        if 'colsample_bylevel' in param:
+            self.alg.set_params(colsample_bylevel=param['colsample_bylevel'])
+            self.model_output['colsample_bylevel'] = param['colsample_bylevel']
+
+        if 'reg_alpha' in param:
+            self.alg.set_params(reg_alpha=param['reg_alpha'])
+            self.model_output['reg_alpha'] = param['reg_alpha']
+
+        if 'reg_lambda' in param:
+            self.alg.set_params(reg_lambda=param['reg_lambda'])
+            self.model_output['reg_lambdas'] = param['reg_lambda']
+
+        if 'scale_pos_weight' in param:
+            self.alg.set_params(scale_pos_weight=param['scale_pos_weight'])
+            self.model_output['scale_pos_weight'] = param['scale_pos_weight']
+
+        if 'base_score' in param:
+            self.alg.set_params(base_score=param['base_score'])
+            self.model_output['base_score'] = param['base_score']
+
+        if 'seed' in param:
+            self.alg.set_params(seed=param['seed'])
+            self.model_output['seed'] = param['seed']
+
+        if 'missing' in param:
+            self.alg.set_params(missing=param['missing'])
+            self.model_output['missing'] = param['missing']
+            #update DMatrix with missing:
+            self.xgtrain = xgb.DMatrix(self.data_train[self.predictors].values, label=self.data_train[self.target].values, missing=param['missing'])
+            self.xgtest = xgb.DMatrix(self.data_test[self.predictors].values, missing=param['missing'])
+
+        if 'num_class' in param:
+            self.num_class = param['num_class']
+
+    # def set_feature_importance(self):
         
-        error = []
-        for train, test in kf:
-            # Filter training data
-            train_predictors = (self.data_train[self.predictors].iloc[train,:])
-            # The target we're using to train the algorithm.
-            train_target = self.data_train[self.target].iloc[train]
-            # Training the algorithm using the predictors and target.
-            self.alg.fit(train_predictors, train_target, eval_metric=self.eval_metric)
-            
-            test_predictors = (self.data_train[self.predictors].iloc[test,:])
-            test_target = self.data_train[self.target].iloc[test]
-
-            #Record error from each cross-validation run
-            error.append(metrics.accuracy_score(test_target, self.alg.predict(test_predictors)))
-            
-        return {'mean_error': np.mean(error),
-                'std_error': np.std(error),
-                'all_error': error }
+    #     fs = self.alg.booster().get_fscore()
+    #     ftimp = pd.DataFrame({
+    #             'feature': fs.keys(),
+    #             'importance_Score': fs.values()
+    #         })
+    #     ftimp['predictor'] = ftimp['feature'].apply(lambda x: self.predictors[int(x[1:])])
+    #     self.feature_imp = pd.Series(ftimp['importance_Score'].values, index=ftimp['predictor'].values)
 
     #Fit the model using predictors and parameters specified before.
     # Inputs:
-    #     printROC - if True, prints an ROC curve. This functionality is currently not implemented
-    def modelfit(self, printROC=False, performCV=True):
-        self.alg.fit(self.data_train[self.predictors], self.data_train[self.target], eval_metric=self.eval_metric)
+    #     printCV - if True, CV is performed
+    def modelfit(self, performCV=True, useTrainCV=False, TrainCVFolds=5, early_stopping_rounds=20, show_progress=True, printTopN='all'):
+
+        if useTrainCV:
+            xgb_param = self.alg.get_xgb_params()
+            if self.num_class>2:
+                xgb_param['num_class']=self.num_class
+            cvresult = xgb.cv(xgb_param,self.xgtrain, num_boost_round=self.alg.get_params()['n_estimators'], nfold=self.cv_folds,
+                metrics=self.scoring_metric_xgb, early_stopping_rounds=early_stopping_rounds, show_progress=show_progress)
+            self.alg.set_params(n_estimators=cvresult.shape[0])
+
+        print self.alg.get_params()
+        obj = self.alg.fit(self.data_train[self.predictors], self.data_train[self.target], eval_metric=self.eval_metric)
         
-        # print self.alg.evals_result()
-        print 'Feature Importance Scores: '
-        self.feature_imp = pd.Series(self.alg.booster().get_fscore(), index=self.predictors).sort_values()
-        print self.feature_imp
+        #Print feature importance
+        # self.set_feature_importance()
+        self.feature_imp = pd.Series(self.alg.booster().get_fscore()).sort_values(ascending=False)
+        num_print = len(self.feature_imp)
+        if printTopN != 'all':
+            num_print = min(printTopN,len(self.feature_imp))
+        self.feature_imp.iloc[:num_print-1].plot(kind='bar', title='Feature Importances')
+        plt.ylabel('Feature Importance Score')
+        plt.show(block=False)
+
         self.model_output['Feature_Importance'] = self.feature_imp.to_string()
 
-        #Get predictions:
-        self.test_predictions = self.alg.predict(self.data_test[self.predictors])
+        #Get train predictions:
         self.train_predictions = self.alg.predict(self.data_train[self.predictors])
-        self.test_pred_prob = self.alg.predict_proba(self.data_train[self.predictors])[:,1]
+        self.train_pred_prob = self.alg.predict_proba(self.data_train[self.predictors])
+
+        #Get test predictions:
+        self.test_predictions = self.alg.predict(self.data_test[self.predictors])
+        self.test_pred_prob = self.alg.predict_proba(self.data_test[self.predictors])
 
         self.calc_model_characteristics(performCV)
-        self.printReport(ROCcurve=printROC)
+        self.printReport()
 
+    
     #Export the model into the model file as well as create a submission with model index. This will be used for creating an ensemble.
     def export_model(self, IDcol):
         self.create_ensemble_dir()
