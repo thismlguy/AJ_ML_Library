@@ -7,7 +7,7 @@ This module is a Sklearn wrapper for running various classification algorithms u
 3. Random Forest
 4. Adaboost
 5. Gradient Boosting Machine
-6. Xgboost (works but still Work In Progress)
+6. Xgboost
 
 Along with algorithms, this module provides an easy way to create ensemble models by providing options of storing the models in a particular format and then easily selecting which ones to combine.
 
@@ -17,14 +17,17 @@ Each algorithm is defined as a class and same function names are defined for eac
 
 The different ways of initializing algorithms are:
 
-1. Logistic_Regression(data_train, data_test, target, predictors)
-2. Decision_Tree_Class(data_train, data_test, target, predictors)
-3. Random_Forest_Class(data_train, data_test, target, predictors)
-4. AdaBoost_Class(data_train, data_test, target, predictors)
-5. GradientBoosting_Class(data_train, data_test, target, predictors)
-6. XGBoost_Class(data_train, data_test, target, predictors)
+1. Logistic_Regression(data_train, data_test, target, predictors, cvfolds=5, scoring_metric='accuracy')
+2. Decision_Tree_Class(data_train, data_test, target, predictors, cvfolds=5, scoring_metric='accuracy')
+3. Random_Forest_Class(data_train, data_test, target, predictors, cvfolds=5, scoring_metric='accuracy')
+4. AdaBoost_Class(data_train, data_test, target, predictors, cvfolds=5, scoring_metric='accuracy')
+5. GradientBoosting_Class(data_train, data_test, target, predictors, cvfolds=5, scoring_metric='accuracy')
+6. XGBoost_Class(data_train, data_test, target, predictors, cvfolds=5, scoring_metric_skl='accuracy', scoring_metric_xgb='error')
 
-Note: The parameters are not defined at this stage, but the data is defined. Now we can perform multiple operations on the same data without having to specify it again and again.
+Note: 
+
+1. The parameters are not defined at this stage, but the data is defined. Now we can perform multiple operations on the same data without having to specify it again and again.
+2. XGBoost has different parameters because it is not part of sklearn library and has different parameters and options
 
 Now let's look at the different functions for each class. Most of the functions are generic accross models. I'll mention the class specific functions in the end if any. Remember to call the functions using classname.function(..)
 
@@ -51,15 +54,27 @@ The arguments are:
 
 The model can be fit by calling the following function:
 
-`modelfit(performCV=True)`
+`modelfit(performCV=True, printTopN='all')`
 
 - This function will fit the model and also perform predictions on the test set. 
-- If the 'performCV' argument is not set to False, it will perform K-fold cross-validation using the same number of folds as passed in the 'cv_folds' parameter. Default value is 10 if not set by user.
 - The function will print the following model characteristics as well:
   1. Confusion Matrix
   2. Accuracy
-  3. AUC (if binary classification problem)
+  3. Specified Scoring Metric
   4. Mean and Standard deviation of Test accuracy of CV folds (only is performCV is True)
+
+parameters:
+1. performCV: If not set to False, it will perform K-fold cross-validation using the same number of folds as passed in the 'cv_folds' parameter. Default value is 5 if not set by user.
+2. printTopN: If a number set, it'll display only top those many variables in feature importance plot
+
+The XGBoost class has a different implementation:
+`modelfit(performCV=True, useTrainCV=False, TrainCVFolds=5, early_stopping_rounds=20, show_progress=True, printTopN='all')`
+
+The different parameters are:
+1. performCV: similar to above
+2. useTrainCV: whether to use "cv" function of xgboost package to change the 'n_estimators' to the value selected from cv run
+3. early_stopping_rounds: input for the cv function. applicable only if useTrainCV is True
+4. show_progress: input for the cv function. applicable only if useTrainCV is True
   
 ### Recursive Feature Elimination (RFE)
 
@@ -91,6 +106,11 @@ This will export a csv file with 2 columns - ID and target variable. The argumen
 
 1. IDcol: The name of the column in dataframe to be used as the ID column. Note that the target feature is already defined in model. 
 2. filename: The name of the the exported file. Default is 'Submission.csv'
+
+`submission_proba(IDcol, proba_colnames, filename="Submission.csv")` 
+This will perform similar function as above but will ouput the predicted probability. It has one additional option:
+3. proba_colnames: A list of colnames in the order of classes which will be used for defining the names of the columns of outcomes of individual probabilities
+
 
 ### Support Functions:
 
